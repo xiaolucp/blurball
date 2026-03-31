@@ -18,8 +18,12 @@ def draw_frame(
     angle=None,
     l=None,
 ):
-    if osp.isfile(img_or_path):
-        img = cv2.imread(img_or_path)
+    if isinstance(img_or_path, (str, os.PathLike)) and osp.isfile(img_or_path):
+        img = cv2.imread(str(img_or_path))
+    elif isinstance(img_or_path, np.ndarray):
+        img = img_or_path
+    elif isinstance(img_or_path, (str, os.PathLike)):
+        img = cv2.imread(str(img_or_path))
     else:
         img = img_or_path
 

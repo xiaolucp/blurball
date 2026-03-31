@@ -63,7 +63,7 @@ def inference_video(
     # Get all frames
     imgs_paths = sorted(Path(frame_dir).glob("*.png"))
 
-    cap = cv2.VideoCapture(input_video_path)
+    cap = cv2.VideoCapture(str(input_video_path))
 
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -175,8 +175,8 @@ def inference_video(
                 if vis_frame_dir is not None
                 else None
             )
-            vis_gt = cv2.imread(img_path)
-            vis_pred = cv2.imread(img_path)
+            vis_gt = cv2.imread(str(img_path))
+            vis_pred = cv2.imread(str(img_path))
 
             for cnt2, img_path2 in enumerate(result_dict.keys()):
                 if cnt2 != cnt:

@@ -1,5 +1,5 @@
 name: inference
-device: cuda
+device: mps
 gpus: [0]
 vis_result: True
 vis_hm: True

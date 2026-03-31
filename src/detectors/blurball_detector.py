@@ -54,10 +54,17 @@ class BlurBallDetector(object):
         _, self._transform = build_img_transforms(cfg)
 
         self._device = cfg["runner"]["device"]
-        if self._device != "cuda":
-            assert 0, "device=cpu not supported"
-        if not torch.cuda.is_available():
-            assert 0, "GPU NOT available"
+        # Support mps (Apple Silicon), cuda, and cpu
+        if self._device == "cuda" and not torch.cuda.is_available():
+            if torch.backends.mps.is_available():
+                log.warning("CUDA not available, falling back to MPS")
+                self._device = "mps"
+            else:
+                log.warning("CUDA not available, falling back to CPU")
+                self._device = "cpu"
+        elif self._device == "mps" and not torch.backends.mps.is_available():
+            log.warning("MPS not available, falling back to CPU")
+            self._device = "cpu"
         self._gpus = cfg["runner"]["gpus"]
 
         if model is None:
@@ -73,10 +80,11 @@ class BlurBallDetector(object):
                 )
                 if not osp.exists(model_path):
                     FileNotFoundError("{} not found".format(model_path))
-            checkpoint = torch.load(model_path, map_location="cuda:0")
+            checkpoint = torch.load(model_path, map_location=self._device)
             self._model.load_state_dict(checkpoint["model_state_dict"])
             self._model = self._model.to(self._device)
-            self._model = nn.DataParallel(self._model, device_ids=self._gpus)
+            if self._device == "cuda":
+                self._model = nn.DataParallel(self._model, device_ids=self._gpus)
         else:
             self._model = model
 

@@ -167,3 +167,12 @@ datasets/*
 outputs
 wandb/
 weights/
+
+# Project specific
+checkpoints/
+dataset_blurball/
+output/
+*.jpg
+*.png
+!src/**/*.py
+.DS_Store
