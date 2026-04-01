@@ -21,6 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.blurball import BlurBall
+from models.trajectory_event_model import TrajectoryEventModel
 
 BN_MOMENTUM = 0.1
 logger = logging.getLogger(__name__)
@@ -253,7 +254,7 @@ class BlurBallMultiTask(nn.Module):
             self.traj_event_head = None
         elif event_head_type == 'trajectory':
             self.event_head = None
-            self.traj_event_head = TrajectoryEventHead(
+            self.traj_event_head = TrajectoryEventModel(
                 traj_len=traj_len,
                 num_seg_classes=num_seg_classes,
                 num_classes=num_event_classes,
@@ -304,11 +305,12 @@ class BlurBallMultiTask(nn.Module):
         y_list = bb.stage4(x_list)
         return y_list
 
-    def forward(self, x, traj=None):
+    def forward(self, x, traj=None, table_kp=None):
         """
         Args:
             x: [B, N*3, H, W] input frames
             traj: [B, T, 3] ball trajectory (x, y, vis) - only for trajectory event head
+            table_kp: [B, 13, 2] table keypoints in pixel coords (optional)
         """
         y_list = self.backbone_forward(x)
 
@@ -335,7 +337,9 @@ class BlurBallMultiTask(nn.Module):
             # Trajectory-based event head
             sg = seg_logits if seg_logits is not None else torch.zeros(
                 x.size(0), 4, 128, 320, device=x.device)
-            event_logits = self.traj_event_head(traj, sg)
+            # Extract seg context for trajectory event head
+            seg_ctx = F.softmax(sg.detach(), dim=1).mean(dim=(2, 3))  # [B, 4]
+            event_logits = self.traj_event_head(traj, seg_ctx, table_kp)
         elif self.event_head is not None:
             # Legacy cascade event head
             b2 = F.interpolate(y_list[2], size=y_list[3].shape[2:],

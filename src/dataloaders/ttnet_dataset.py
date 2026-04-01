@@ -154,6 +154,14 @@ def build_samples(data_root, split='training', games=None, num_frames=3,
                     tx, ty, tvis = 0, 0, 0
                 traj.append((tx, ty, tvis))
 
+            # Table keypoints (13 points from UpliftingTableTennis)
+            table_kp_key = f'{split}/{game}'
+            table_kp = None
+            if predicted_positions and '__table_keypoints__' in predicted_positions:
+                tkp_data = predicted_positions['__table_keypoints__'].get(table_kp_key)
+                if tkp_data:
+                    table_kp = tkp_data  # [[x,y,vis]*13] in original resolution
+
             samples.append({
                 'video_path': video_path,
                 'frame_ids': frame_ids,
@@ -164,6 +172,7 @@ def build_samples(data_root, split='training', games=None, num_frames=3,
                 'game': game,
                 'frame_id': fid,
                 'traj': traj,
+                'table_kp': table_kp,
             })
 
     log.info(f"[{split}] Built {len(samples)} samples from {len(games)} games")
@@ -270,6 +279,20 @@ class TTNetMultiTaskDataset(Dataset):
                 traj_scaled.append([0.0, 0.0, 0.0])
         traj_tensor = torch.tensor(traj_scaled, dtype=torch.float32)  # [T, 3]
 
+        # Table keypoints: scale from original resolution to model input coords
+        table_kp_raw = s.get('table_kp')
+        if table_kp_raw is not None:
+            table_kp_scaled = []
+            for kp in table_kp_raw:
+                kx = kp[0] / orig_w * self.img_size[1]
+                ky = kp[1] / orig_h * self.img_size[0]
+                if do_hflip:
+                    kx = self.img_size[1] - kx
+                table_kp_scaled.append([kx, ky])
+            table_kp_tensor = torch.tensor(table_kp_scaled, dtype=torch.float32)  # [13, 2]
+        else:
+            table_kp_tensor = torch.zeros(13, 2, dtype=torch.float32)
+
         return (
             input_tensor,                                    # [N*3, H, W]
             torch.from_numpy(ball_hm).float(),               # [H, W]
@@ -277,6 +300,7 @@ class TTNetMultiTaskDataset(Dataset):
             torch.tensor(event_label, dtype=torch.long),      # scalar
             torch.from_numpy(seg).long(),                     # [Hs, Ws]
             traj_tensor,                                      # [T, 3] (x, y, vis)
+            table_kp_tensor,                                  # [13, 2] (x, y)
         )
 
     def _make_heatmap(self, cx, cy, vis, h, w, sigma=5):

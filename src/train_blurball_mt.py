@@ -93,11 +93,11 @@ def train_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch):
     metrics = {'total': 0, 'ball': 0, 'event': 0, 'seg': 0, 'event_acc': 0, 'n': 0}
 
     for batch in tqdm(loader, desc=f'Train E{epoch}'):
-        inp, ball_hm, vis, event, seg, traj = [x.to(device) for x in batch]
+        inp, ball_hm, vis, event, seg, traj, table_kp = [x.to(device) for x in batch]
 
         optimizer.zero_grad()
         with torch.autocast(device_type='cuda'):
-            ball_pred, event_pred, seg_pred = model(inp, traj=traj)
+            ball_pred, event_pred, seg_pred = model(inp, traj=traj, table_kp=table_kp)
 
         total, loss_d = loss_fn(ball_pred, event_pred, seg_pred,
                                 ball_hm, vis, event, seg)
@@ -177,6 +177,8 @@ def main():
                         help='Number of frames after center for trajectory')
     parser.add_argument('--pred_positions', type=str, default=None,
                         help='Path to predicted ball positions JSON (use model predictions instead of GT)')
+    parser.add_argument('--table_keypoints', type=str, default=None,
+                        help='Path to 13-point table keypoints JSON (from UpliftingTableTennis)')
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -230,6 +232,22 @@ def main():
                  f"({sum(len(v) for v in pred_pos.values())} frames)")
     elif args.pred_positions:
         log.warning(f"Predicted positions file not found: {args.pred_positions}, using GT")
+
+    # Load table keypoints (13 points from UpliftingTableTennis)
+    if args.table_keypoints and os.path.exists(args.table_keypoints):
+        import json as json_mod2
+        with open(args.table_keypoints) as f:
+            table_kp_data = json_mod2.load(f)
+        # Extract just the keypoints (x, y) for each game, store under special key
+        table_kp_for_dataset = {}
+        for key, val in table_kp_data.items():
+            kps = val['keypoints']  # [[x, y, vis], ...] × 13
+            kp_res = val['resolution']  # [w, h] of original detection
+            table_kp_for_dataset[key] = [[kp[0], kp[1]] for kp in kps]  # drop vis, keep x,y
+        if pred_pos is None:
+            pred_pos = {}
+        pred_pos['__table_keypoints__'] = table_kp_for_dataset
+        log.info(f"Loaded table keypoints for {len(table_kp_for_dataset)} games")
 
     train_samples = build_samples(args.data_root, 'training', num_frames=args.num_frames,
                                   require_event=True,

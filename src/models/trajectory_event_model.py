@@ -29,15 +29,22 @@ import torch.nn.functional as F
 
 
 class TrajectoryEventModel(nn.Module):
-    """Standalone event classifier from ball trajectory."""
+    """Standalone event classifier from ball trajectory + table geometry.
+
+    v2: adds 13 table keypoints as spatial context.
+    The model knows where the table corners and net are, so it can reason about
+    whether the ball is near the table surface (bounce) or near the net (net hit).
+    """
 
     def __init__(self, traj_len=9, num_seg_classes=4, num_classes=3,
                  hidden_dim=64, dropout_p=0.3,
-                 input_width=512, input_height=288):
+                 input_width=512, input_height=288,
+                 num_table_keypoints=13):
         super().__init__()
         self.traj_len = traj_len
         self.input_width = input_width
         self.input_height = input_height
+        self.num_table_keypoints = num_table_keypoints
 
         # 1D Conv trajectory encoder
         self.traj_encoder = nn.Sequential(
@@ -51,14 +58,22 @@ class TrajectoryEventModel(nn.Module):
         )
 
         # Handcrafted motion features dimension
-        # velocity: 2 * (T-1), acceleration: 2 * (T-2)
         vel_feat_dim = 2 * (traj_len - 1) + 2 * (traj_len - 2)
 
         # Seg context: class proportions
         seg_feat_dim = num_seg_classes
 
+        # Table geometry features:
+        # 13 keypoints × 2 coords = 26 (normalized)
+        # + relative features: ball-to-table-surface distance per frame,
+        #   ball-to-net distance per frame
+        table_raw_dim = num_table_keypoints * 2  # 26
+        # Ball-table relative features: for each traj frame,
+        # compute distance to nearest table edge and to net
+        ball_table_dim = traj_len * 2  # dist_to_surface + dist_to_net per frame
+
         # Classifier
-        total_dim = 64 + vel_feat_dim + seg_feat_dim
+        total_dim = 64 + vel_feat_dim + seg_feat_dim + table_raw_dim + ball_table_dim
         self.classifier = nn.Sequential(
             nn.Linear(total_dim, hidden_dim),
             nn.ReLU(inplace=True),
@@ -69,11 +84,46 @@ class TrajectoryEventModel(nn.Module):
             nn.Linear(hidden_dim // 2, num_classes),
         )
 
-    def forward(self, traj, seg_ctx=None):
+    def _compute_ball_table_features(self, traj_norm, table_kp_norm):
+        """Compute per-frame ball-to-table relative features.
+
+        Args:
+            traj_norm: [B, T, 2] normalized ball positions
+            table_kp_norm: [B, 13, 2] normalized table keypoints
+        Returns:
+            [B, T, 2] — (dist_to_surface, dist_to_net) per frame
+        """
+        B, T, _ = traj_norm.shape
+
+        # Table surface y: average of near/far edge y coords
+        # close_left(0), close_right(1) = near edge
+        # far_left(4), far_right(5) = far edge
+        near_y = (table_kp_norm[:, 0, 1] + table_kp_norm[:, 1, 1]) / 2  # [B]
+        far_y = (table_kp_norm[:, 4, 1] + table_kp_norm[:, 5, 1]) / 2   # [B]
+        surface_y = (near_y + far_y) / 2  # [B] approx table surface y
+
+        # Net x: center of net
+        # net_left_bot(6), net_right_bot(7)
+        net_x = (table_kp_norm[:, 6, 0] + table_kp_norm[:, 7, 0]) / 2   # [B]
+        net_y = (table_kp_norm[:, 9, 1] + table_kp_norm[:, 10, 1]) / 2  # [B] net top y
+
+        ball_y = traj_norm[:, :, 1]  # [B, T]
+        ball_x = traj_norm[:, :, 0]  # [B, T]
+
+        # Distance to table surface (y direction, positive = above table)
+        dist_surface = ball_y - surface_y.unsqueeze(1)  # [B, T]
+
+        # Distance to net (x direction)
+        dist_net = torch.abs(ball_x - net_x.unsqueeze(1))  # [B, T]
+
+        return torch.stack([dist_surface, dist_net], dim=2)  # [B, T, 2]
+
+    def forward(self, traj, seg_ctx=None, table_kp=None):
         """
         Args:
             traj: [B, T, 3] — (x, y, visibility) per frame, in pixel coords
             seg_ctx: [B, 4] — segmentation class proportions (optional)
+            table_kp: [B, 13, 2] — table keypoints in pixel coords (optional)
         Returns:
             event_logits: [B, num_classes]
         """
@@ -102,12 +152,29 @@ class TrajectoryEventModel(nn.Module):
 
         motion_feat = torch.cat([vel.reshape(B, -1), acc.reshape(B, -1)], dim=1)
 
-        # Seg context (default zeros if not provided)
+        # Seg context
         if seg_ctx is None:
             seg_ctx = torch.zeros(B, 4, device=traj.device)
 
+        # Table keypoints features
+        if table_kp is not None:
+            # Normalize table keypoints to [0, 1]
+            table_kp_norm = table_kp.clone()
+            table_kp_norm[:, :, 0] = table_kp_norm[:, :, 0] / self.input_width
+            table_kp_norm[:, :, 1] = table_kp_norm[:, :, 1] / self.input_height
+            table_raw = table_kp_norm.reshape(B, -1)  # [B, 26]
+
+            # Ball-table relative features
+            ball_table = self._compute_ball_table_features(
+                traj_norm[:, :, :2], table_kp_norm)  # [B, T, 2]
+            ball_table_flat = ball_table.reshape(B, -1)  # [B, T*2]
+        else:
+            table_raw = torch.zeros(B, self.num_table_keypoints * 2, device=traj.device)
+            ball_table_flat = torch.zeros(B, self.traj_len * 2, device=traj.device)
+
         # Fuse and classify
-        fused = torch.cat([traj_feat, motion_feat, seg_ctx], dim=1)
+        fused = torch.cat([traj_feat, motion_feat, seg_ctx,
+                           table_raw, ball_table_flat], dim=1)
         return self.classifier(fused)
 
     @torch.no_grad()
